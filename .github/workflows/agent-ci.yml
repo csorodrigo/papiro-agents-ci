@@ -1,0 +1,98 @@
+name: Hermes Agent CI
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      project:
+        description: Optional exact project slug
+        required: false
+        type: choice
+        default: all
+        options:
+          - all
+          - lucrandoai
+          - papiro
+      branch:
+        description: Optional exact agent/ops-<16 hex> branch
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: hermes-agent-ci
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_work: ${{ steps.discover.outputs.has_work }}
+      matrix: ${{ steps.discover.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - id: discover
+        env:
+          BROKER_GITHUB_TOKEN: ${{ secrets.BROKER_GITHUB_TOKEN }}
+          INPUT_PROJECT: ${{ inputs.project }}
+          INPUT_BRANCH: ${{ inputs.branch }}
+        run: node scripts/discover.mjs
+
+  validate:
+    needs: discover
+    if: needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: Clone exact source SHA and validate
+        env:
+          READ_KEY: ${{ matrix.project == 'papiro' && secrets.PAPIRO_READ_KEY || secrets.LUCRANDOAI_READ_KEY }}
+        run: |
+          control/scripts/validate.sh \
+            '${{ matrix.project }}' \
+            '${{ matrix.repository }}' \
+            '${{ matrix.branch }}' \
+            '${{ matrix.sha }}' \
+            "$RUNNER_TEMP/result"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: result-${{ matrix.project }}-${{ matrix.sha }}
+          path: ${{ runner.temp }}/result/result.json
+          if-no-files-found: error
+          retention-days: 2
+
+  report:
+    needs:
+      - discover
+      - validate
+    if: always() && needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: ${{ runner.temp }}/results
+      - env:
+          BROKER_GITHUB_TOKEN: ${{ secrets.BROKER_GITHUB_TOKEN }}
+        run: node scripts/report.mjs "$RUNNER_TEMP/results"
