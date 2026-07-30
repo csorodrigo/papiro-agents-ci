@@ -55,7 +55,12 @@ else
   run_gate npm run db:push:test
   run_gate npm run test:gate:ci
   run_gate npm run canvas:check
-  run_gate npm run prisma:validate:supabase
+  if [[ "$status" -eq 0 ]]; then
+    commands+=("npm run prisma:validate:supabase (isolated CI placeholder URLs)")
+    DATABASE_URL='postgresql://ci:ci@127.0.0.1:5432/ci' \
+      DIRECT_URL='postgresql://ci:ci@127.0.0.1:5432/ci' \
+      npm run prisma:validate:supabase || status=$?
+  fi
 fi
 cd ..
 
