@@ -52,6 +52,7 @@ run_gate npm run typecheck:codex
 if [[ "$project" == "lucrandoai" ]]; then
   run_gate npm run test:ci
 else
+  run_gate npm run db:push:test
   run_gate npm run test:gate:ci
   run_gate npm run canvas:check
   run_gate npm run prisma:validate:supabase

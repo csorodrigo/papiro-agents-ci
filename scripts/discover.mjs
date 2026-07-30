@@ -61,7 +61,7 @@ for (const [project, repository] of Object.entries(projects)) {
         item.context === "hermes-agent-ci" &&
         ["success", "failure", "error"].includes(item.state),
     );
-    if (terminal) continue;
+    if (terminal && !process.env.INPUT_BRANCH) continue;
     await request(`/repos/${repository}/statuses/${sha}`, {
       method: "POST",
       body: JSON.stringify({
