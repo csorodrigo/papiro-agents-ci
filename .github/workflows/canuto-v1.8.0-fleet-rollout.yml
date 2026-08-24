@@ -1,0 +1,243 @@
+name: Canuto v1.8.0 fleet rollout (one-shot)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/canuto-v1.8.0-fleet-rollout.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canuto-v1.8.0-fleet-rollout
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    name: Rollout ${{ matrix.project }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - project: lucrandoai
+            repository: csorodrigo/lucrando-ai
+            branch: codex/canuto-1.8.0-rollout
+            expected_head: 4243c014d8071613c85b5e352c46d9efe9363763
+          - project: papiro
+            repository: csorodrigo/papiro
+            branch: codex/canuto-1.8.0-rollout
+            expected_head: fadd3877a31936e7cda1595a46b955301fcc6d17
+          - project: mecesa
+            repository: csorodrigo/mecesa
+            branch: codex/canuto-1.8.0-rollout
+            expected_head: ed9006d795798626dad3d50d39ce9b682c3beaa9
+
+    env:
+      CANUTO_RELEASE_COMMIT: 9d178de80bb1267573b77175f838b977b375047b
+      CANUTO_RELEASE_TREE: 81ac36d77b8b69b41ae39c8d218e6243db57326d
+      CANUTO_INSTALL_BLOB: 80c427e42fc8126a80725d5de74ab00f11643054
+      CANUTO_MANIFEST_SHA256: 54cbd0c46ed19c308d83a8fba720078ea84f11da7744b48d2579c4b83b7c87a9
+      TARGET_DIR: ${{ runner.temp }}/consumer
+      RELEASE_DIR: ${{ runner.temp }}/canuto-framework
+
+    steps:
+      - name: Verify broker access without executing repository code
+        env:
+          BROKER_GITHUB_TOKEN: ${{ secrets.BROKER_GITHUB_TOKEN }}
+          TARGET_REPOSITORY: ${{ matrix.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${BROKER_GITHUB_TOKEN:-}"
+          echo "::add-mask::$BROKER_GITHUB_TOKEN"
+          response="$(curl -fsSL \
+            -H "Authorization: Bearer $BROKER_GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$TARGET_REPOSITORY")"
+          python3 - "$TARGET_REPOSITORY" "$response" <<'PY'
+          import json
+          import sys
+          expected, raw = sys.argv[1:]
+          data = json.loads(raw)
+          assert data.get("full_name") == expected, data
+          permissions = data.get("permissions") or {}
+          assert permissions.get("push") or permissions.get("admin"), permissions
+          print(f"broker access: {expected} push={permissions.get('push')} admin={permissions.get('admin')}")
+          PY
+
+      - name: Clone and verify immutable Canuto v1.8.0 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q "$RELEASE_DIR"
+          git -C "$RELEASE_DIR" remote add origin https://github.com/csorodrigo/canuto-framework.git
+          git -C "$RELEASE_DIR" fetch -q --no-tags --depth=1 origin "$CANUTO_RELEASE_COMMIT"
+          git -C "$RELEASE_DIR" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$RELEASE_DIR" rev-parse HEAD)" = "$CANUTO_RELEASE_COMMIT"
+          test "$(git -C "$RELEASE_DIR" rev-parse HEAD^{tree})" = "$CANUTO_RELEASE_TREE"
+          test "$(git -C "$RELEASE_DIR" rev-parse HEAD:install.sh)" = "$CANUTO_INSTALL_BLOB"
+          test "$(tr -d '[:space:]' < "$RELEASE_DIR/.agents/VERSION")" = "1.8.0"
+          bash -n "$RELEASE_DIR/install.sh"
+
+      - name: Clone exact consumer branch with token isolated
+        env:
+          BROKER_GITHUB_TOKEN: ${{ secrets.BROKER_GITHUB_TOKEN }}
+          TARGET_REPOSITORY: ${{ matrix.repository }}
+          TARGET_BRANCH: ${{ matrix.branch }}
+          EXPECTED_HEAD: ${{ matrix.expected_head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$BROKER_GITHUB_TOKEN"
+          auth="$(printf 'x-access-token:%s' "$BROKER_GITHUB_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git init -q "$TARGET_DIR"
+          git -C "$TARGET_DIR" remote add origin "https://github.com/$TARGET_REPOSITORY.git"
+          git -C "$TARGET_DIR" \
+            -c "http.https://github.com/.extraheader=Authorization: Basic $auth" \
+            fetch -q --no-tags origin \
+              "$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
+          git -C "$TARGET_DIR" checkout -q -b "$TARGET_BRANCH" \
+            "refs/remotes/origin/$TARGET_BRANCH"
+          test "$(git -C "$TARGET_DIR" rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test -z "$(git -C "$TARGET_DIR" status --porcelain --untracked-files=all)"
+          unset auth BROKER_GITHUB_TOKEN
+
+      - name: Apply release through the canonical installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TARGET_DIR"
+          git config user.name "canuto-rollout-bot"
+          git config user.email "canuto-rollout-bot@users.noreply.github.com"
+
+          CANUTO_BOOTSTRAPPED=1 \
+          CANUTO_SOURCE_DIR="$RELEASE_DIR" \
+          CANUTO_SOURCE_TRANSPORT="local-verified-commit" \
+            /bin/bash "$RELEASE_DIR/install.sh" \
+              --update \
+              --version 1.8.0 \
+              --yes \
+              --commit
+
+          if test -e .github/workflows/canuto-1.8.0-rollout.yml; then
+            git rm -f .github/workflows/canuto-1.8.0-rollout.yml
+            git commit -m "chore(canuto): remove one-shot rollout workflow"
+          fi
+
+      - name: Validate final consumer commit
+        id: validate
+        env:
+          TARGET_REPOSITORY: ${{ matrix.repository }}
+          TARGET_BRANCH: ${{ matrix.branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TARGET_DIR"
+          mkdir -p "$RUNNER_TEMP/evidence"
+
+          /bin/bash -n install.sh
+
+          CANUTO_BOOTSTRAPPED=1 \
+          CANUTO_SOURCE_DIR="$RELEASE_DIR" \
+          CANUTO_SOURCE_TRANSPORT="local-verified-commit" \
+            /bin/bash install.sh --check --version 1.8.0 \
+              | tee "$RUNNER_TEMP/evidence/check.log"
+
+          smoke_json="$RUNNER_TEMP/evidence/consumer-smoke.json"
+          CLAUDE_PROJECT_DIR="$TARGET_DIR" \
+            /bin/bash .agents/tools/canuto-consumer-smoke.sh --json > "$smoke_json"
+
+          python3 - \
+            "$smoke_json" \
+            ".agents/SOURCE-RECEIPT.json" \
+            "$CANUTO_MANIFEST_SHA256" <<'PY'
+          import json
+          import sys
+
+          smoke_path, receipt_path, manifest = sys.argv[1:]
+          with open(smoke_path, encoding="utf-8") as fh:
+              smoke = json.load(fh)
+          assert smoke.get("tool") == "canuto-consumer-smoke", smoke
+          assert smoke.get("counts", {}).get("fail") == 0, smoke
+          assert smoke.get("verdict") in {"HEALTHY", "DEGRADED"}, smoke
+
+          with open(receipt_path, encoding="utf-8") as fh:
+              receipt = json.load(fh)
+          assert receipt.get("schemaVersion") == 1, receipt
+          assert receipt.get("scope") == "framework", receipt
+          assert receipt.get("sourceKind") == "version", receipt
+          assert receipt.get("sourceRef") == "releases/1.8.0", receipt
+          assert receipt.get("frameworkVersion") == "1.8.0", receipt
+          assert receipt.get("releaseVersion") == "1.8.0", receipt
+          assert receipt.get("manifestSha256") == manifest, receipt
+          assert receipt.get("transport") == "local-verified-commit", receipt
+          print("consumer smoke:", smoke.get("verdict"), smoke.get("counts"))
+          print("source receipt:", receipt)
+          PY
+
+          test "$(tr -d '[:space:]' < .agents/VERSION)" = "1.8.0"
+          test ! -e .github/workflows/canuto-1.8.0-rollout.yml
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+          cp .agents/SOURCE-RECEIPT.json "$RUNNER_TEMP/evidence/SOURCE-RECEIPT.json"
+          cp .agents/VERSION "$RUNNER_TEMP/evidence/VERSION"
+          git log --oneline --decorate -8 > "$RUNNER_TEMP/evidence/git-log.txt"
+          git diff --stat "origin/$TARGET_BRANCH...HEAD" > "$RUNNER_TEMP/evidence/diff-stat.txt"
+          final_sha="$(git rev-parse HEAD)"
+          printf '%s\n' "$final_sha" > "$RUNNER_TEMP/evidence/final-sha.txt"
+          echo "final_sha=$final_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Push validated commit without executing hooks under broker credentials
+        env:
+          BROKER_GITHUB_TOKEN: ${{ secrets.BROKER_GITHUB_TOKEN }}
+          TARGET_REPOSITORY: ${{ matrix.repository }}
+          TARGET_BRANCH: ${{ matrix.branch }}
+          FINAL_SHA: ${{ steps.validate.outputs.final_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TARGET_DIR"
+          test "$(git rev-parse HEAD)" = "$FINAL_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          echo "::add-mask::$BROKER_GITHUB_TOKEN"
+          auth="$(printf 'x-access-token:%s' "$BROKER_GITHUB_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git \
+            -c "http.https://github.com/.extraheader=Authorization: Basic $auth" \
+            push --no-verify origin "HEAD:$TARGET_BRANCH"
+          unset auth
+
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $BROKER_GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$TARGET_REPOSITORY/statuses/$FINAL_SHA" \
+            -d "$(python3 - "$run_url" <<'PY'
+          import json
+          import sys
+          print(json.dumps({
+              "state": "success",
+              "context": "canuto-v1.8.0-rollout",
+              "description": "Pinned Canuto v1.8.0 check and consumer smoke passed",
+              "target_url": sys.argv[1],
+          }))
+          PY
+          )" >/dev/null
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: canuto-v1.8.0-${{ matrix.project }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: warn
+          retention-days: 7
