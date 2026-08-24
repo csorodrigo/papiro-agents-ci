@@ -6,6 +6,11 @@ on:
       - main
     paths:
       - .github/workflows/canuto-v1.8.0-fleet-rollout.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .canuto-v1.8.0-rollout-trigger
   workflow_dispatch:
 
 permissions:
@@ -13,7 +18,7 @@ permissions:
 
 concurrency:
   group: canuto-v1.8.0-fleet-rollout
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   rollout:
@@ -86,7 +91,8 @@ jobs:
           test "$(tr -d '[:space:]' < "$RELEASE_DIR/.agents/VERSION")" = "1.8.0"
           bash -n "$RELEASE_DIR/install.sh"
 
-      - name: Clone exact consumer branch with token isolated
+      - name: Clone current consumer branch with token isolated
+        id: clone
         env:
           BROKER_GITHUB_TOKEN: ${{ secrets.BROKER_GITHUB_TOKEN }}
           TARGET_REPOSITORY: ${{ matrix.repository }}
@@ -106,11 +112,37 @@ jobs:
               "$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
           git -C "$TARGET_DIR" checkout -q -b "$TARGET_BRANCH" \
             "refs/remotes/origin/$TARGET_BRANCH"
-          test "$(git -C "$TARGET_DIR" rev-parse HEAD)" = "$EXPECTED_HEAD"
+          current_head="$(git -C "$TARGET_DIR" rev-parse HEAD)"
           test -z "$(git -C "$TARGET_DIR" status --porcelain --untracked-files=all)"
           unset auth BROKER_GITHUB_TOKEN
 
+          if test "$current_head" = "$EXPECTED_HEAD"; then
+            echo "needs_apply=true" >> "$GITHUB_OUTPUT"
+            echo "current_head=$current_head" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A concurrent earlier attempt may already have completed. Accept only
+          # a fully formed rollout; any unrelated head movement remains fatal.
+          test -f "$TARGET_DIR/.agents/VERSION"
+          test "$(tr -d '[:space:]' < "$TARGET_DIR/.agents/VERSION")" = "1.8.0"
+          test -f "$TARGET_DIR/.agents/SOURCE-RECEIPT.json"
+          test ! -e "$TARGET_DIR/.github/workflows/canuto-1.8.0-rollout.yml"
+          python3 - "$TARGET_DIR/.agents/SOURCE-RECEIPT.json" "$CANUTO_MANIFEST_SHA256" <<'PY'
+          import json
+          import sys
+          path, manifest = sys.argv[1:]
+          with open(path, encoding="utf-8") as fh:
+              receipt = json.load(fh)
+          assert receipt.get("sourceRef") == "releases/1.8.0", receipt
+          assert receipt.get("frameworkVersion") == "1.8.0", receipt
+          assert receipt.get("manifestSha256") == manifest, receipt
+          PY
+          echo "needs_apply=false" >> "$GITHUB_OUTPUT"
+          echo "current_head=$current_head" >> "$GITHUB_OUTPUT"
+
       - name: Apply release through the canonical installer
+        if: steps.clone.outputs.needs_apply == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -195,12 +227,13 @@ jobs:
           printf '%s\n' "$final_sha" > "$RUNNER_TEMP/evidence/final-sha.txt"
           echo "final_sha=$final_sha" >> "$GITHUB_OUTPUT"
 
-      - name: Push validated commit without executing hooks under broker credentials
+      - name: Publish validated SHA without executing hooks under broker credentials
         env:
           BROKER_GITHUB_TOKEN: ${{ secrets.BROKER_GITHUB_TOKEN }}
           TARGET_REPOSITORY: ${{ matrix.repository }}
           TARGET_BRANCH: ${{ matrix.branch }}
           FINAL_SHA: ${{ steps.validate.outputs.final_sha }}
+          NEEDS_APPLY: ${{ steps.clone.outputs.needs_apply }}
         shell: bash
         run: |
           set -euo pipefail
@@ -208,12 +241,18 @@ jobs:
           test "$(git rev-parse HEAD)" = "$FINAL_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
           echo "::add-mask::$BROKER_GITHUB_TOKEN"
-          auth="$(printf 'x-access-token:%s' "$BROKER_GITHUB_TOKEN" | base64 -w0)"
-          echo "::add-mask::$auth"
-          git \
-            -c "http.https://github.com/.extraheader=Authorization: Basic $auth" \
-            push --no-verify origin "HEAD:$TARGET_BRANCH"
-          unset auth
+
+          if test "$NEEDS_APPLY" = "true"; then
+            auth="$(printf 'x-access-token:%s' "$BROKER_GITHUB_TOKEN" | base64 -w0)"
+            echo "::add-mask::$auth"
+            git \
+              -c "http.https://github.com/.extraheader=Authorization: Basic $auth" \
+              push --no-verify origin "HEAD:$TARGET_BRANCH"
+            unset auth
+          else
+            remote_head="$(git rev-parse "refs/remotes/origin/$TARGET_BRANCH")"
+            test "$remote_head" = "$FINAL_SHA"
+          fi
 
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           curl -fsSL -X POST \
