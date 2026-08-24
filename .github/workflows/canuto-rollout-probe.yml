@@ -1,0 +1,19 @@
+name: Canuto rollout probe
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .canuto-v1.8.0-rollout-trigger
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Confirm GitHub Actions execution
+        run: echo "canuto-rollout-probe=ok"
