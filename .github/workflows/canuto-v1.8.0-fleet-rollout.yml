@@ -50,6 +50,7 @@ jobs:
       CANUTO_MANIFEST_SHA256: 54cbd0c46ed19c308d83a8fba720078ea84f11da7744b48d2579c4b83b7c87a9
       TARGET_DIR: /tmp/canuto-consumer
       RELEASE_DIR: /tmp/canuto-framework
+      GIT_LFS_SKIP_SMUDGE: "1"
 
     steps:
       - name: Verify broker access without executing repository code
