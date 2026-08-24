@@ -48,8 +48,8 @@ jobs:
       CANUTO_RELEASE_TREE: 81ac36d77b8b69b41ae39c8d218e6243db57326d
       CANUTO_INSTALL_BLOB: 80c427e42fc8126a80725d5de74ab00f11643054
       CANUTO_MANIFEST_SHA256: 54cbd0c46ed19c308d83a8fba720078ea84f11da7744b48d2579c4b83b7c87a9
-      TARGET_DIR: ${{ runner.temp }}/consumer
-      RELEASE_DIR: ${{ runner.temp }}/canuto-framework
+      TARGET_DIR: /tmp/canuto-consumer
+      RELEASE_DIR: /tmp/canuto-framework
 
     steps:
       - name: Verify broker access without executing repository code
